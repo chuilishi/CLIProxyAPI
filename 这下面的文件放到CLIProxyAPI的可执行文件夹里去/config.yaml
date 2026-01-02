@@ -1,0 +1,79 @@
+# CLIProxyAPI Configuration for Antigravity + Claude Code
+# This configuration works out of the box after running setup-claude-local.ps1/sh
+
+# Server port
+port: 8317
+
+# Server host/interface to bind to. Empty binds all interfaces.
+host: ""
+
+# Authentication directory (supports ~ for home directory)
+auth-dir: "~/.cli-proxy-api"
+
+# API keys for authentication (can use any placeholder for OAuth login)
+api-keys:
+  - "sk-dummy"
+
+# Enable debug logging (set to true for troubleshooting)
+debug: false
+
+# Enable detailed request/response logging (logs to ~/.cli-proxy-api/logs/)
+request-log: false
+
+# Number of times to retry a request on errors (403, 408, 500, 502, 503, 504)
+request-retry: 3
+
+# Maximum wait time in seconds for a cooled-down credential before triggering a retry
+max-retry-interval: 30
+
+# Quota exceeded behavior
+quota-exceeded:
+  switch-project: true
+  switch-preview-model: true
+
+# Routing strategy for selecting credentials when multiple match
+# - round-robin: Rotate between all available accounts
+# - fill-first: Use one account until quota exhausted, then switch to next
+routing:
+  strategy: "round-robin"
+
+# TLS settings (disabled by default for local use)
+tls:
+  enable: false
+  cert: ""
+  key: ""
+
+# Management API settings
+remote-management:
+  allow-remote: false
+  secret-key: ""
+  disable-control-panel: false
+
+# When false, disable in-memory usage statistics aggregation
+usage-statistics-enabled: false
+
+# When true, write application logs to rotating files instead of stdout
+logging-to-file: false
+
+# Proxy URL (uncomment and set if you need a proxy)
+# proxy-url: "socks5://127.0.0.1:1080"
+
+# OAuth model name mappings for Antigravity + Claude Code
+# Maps Claude Code's official model names to Antigravity's Gemini 3 models
+oauth-model-mappings:
+  antigravity:
+    # Claude Opus -> Antigravity's gemini-claude-opus with thinking
+    - name: "gemini-claude-opus-4-5-thinking"
+      alias: "claude-opus-4-5-20251101"
+    # Claude Sonnet -> Gemini 3 Pro Preview
+    - name: "gemini-3-pro-preview"
+      alias: "claude-sonnet-4-5-20250929"
+    # Claude Haiku -> Gemini 3 Flash Preview
+    - name: "gemini-3-flash-preview"
+      alias: "claude-haiku-4-5-20251001"
+    # Sonnet with thinking suffix -> Gemini 3 Pro Preview
+    - name: "gemini-3-pro-preview"
+      alias: "claude-sonnet-4-5-20250929-thinking"
+    # Opus with thinking suffix
+    - name: "gemini-claude-opus-4-5-thinking"
+      alias: "claude-4-5-20251101-thinking"

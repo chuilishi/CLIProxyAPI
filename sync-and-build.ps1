@@ -1,5 +1,5 @@
 # CLIProxyAPI 一键同步编译脚本
-# 功能: 同步上游 -> 编译 -> 重启服务 -> 推送到 fork
+# 功能: 同步上游 -> 编译 -> 重启服务 -> 推送到 fork -> 复制相关文件到执行文件文件夹
 
 $ErrorActionPreference = "Stop"
 
