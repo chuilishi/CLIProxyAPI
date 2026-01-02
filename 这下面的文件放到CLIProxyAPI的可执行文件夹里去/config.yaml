@@ -15,10 +15,10 @@ api-keys:
   - "sk-dummy"
 
 # Enable debug logging (set to true for troubleshooting)
-debug: false
+debug: true
 
 # Enable detailed request/response logging (logs to ~/.cli-proxy-api/logs/)
-request-log: false
+request-log: true
 
 # Number of times to retry a request on errors (403, 408, 500, 502, 503, 504)
 request-retry: 3
