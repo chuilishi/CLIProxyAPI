@@ -15,7 +15,7 @@ api-keys:
   - "sk-dummy"
 
 # Enable debug logging (set to true for troubleshooting)
-debug: true
+debug: false
 
 # Enable detailed request/response logging (logs to ~/.cli-proxy-api/logs/)
 request-log: true
