@@ -44,11 +44,11 @@ try {
     # Fetch upstream
     git fetch $UpstreamRemote 2>&1 | Out-Null
 
-    $localCommit = git rev-parse HEAD
-    $upstreamCommit = git rev-parse "$UpstreamRemote/$MainBranch" 2>$null
+    # 检查 upstream 是否有新的 commit 需要合并（而不是简单比较是否相同）
+    $newCommits = git rev-list "HEAD..$UpstreamRemote/$MainBranch" --count 2>$null
 
-    if ($localCommit -ne $upstreamCommit -and $upstreamCommit) {
-        Write-Info "发现上游更新，合并中..."
+    if ($newCommits -gt 0) {
+        Write-Info "发现上游更新 ($newCommits 个新提交)，合并中..."
 
         # Stash 本地修改（包括暂存区）
         $hasChanges = git status --porcelain
