@@ -1,0 +1,63 @@
+# Antigravity 智能重试配置
+# 此文件用于自定义 Antigravity 的重试/轮询策略
+# 设计用于 5 小时配额刷新周期的场景
+
+smartRetry:
+  # 是否启用智能重试
+  enabled: true
+
+  # 最大重试次数
+  # 建议值: 10-20 (根据你的耐心程度)
+  maxRetries: 10
+
+  # 初始等待时间 (秒)
+  # 第一次重试前等待的时间
+  initialWaitSeconds: 30
+
+  # 最大等待时间 (秒)
+  # 单次等待不会超过这个值
+  # 建议值: 300 (5分钟) - 600 (10分钟)
+  maxWaitSeconds: 300
+
+  # 配额检查间隔 (秒)
+  # 在等待期间多久检查一次配额状态
+  quotaCheckIntervalSeconds: 60
+
+  # 配额低阈值 (百分比)
+  # 低于此值时认为配额不足
+  quotaLowThreshold: 5.0
+
+  # 是否在等待时查询配额状态
+  # 开启后会主动轮询配额，一旦恢复立即重试
+  checkQuotaWhileWaiting: true
+
+  # 配额刷新周期 (小时)
+  # Antigravity 默认每 5 小时刷新一次
+  quotaResetHours: 5
+
+# 账号轮询策略
+accountRotation:
+  # 是否启用账号轮询
+  enabled: true
+
+  # 轮询策略: "round-robin" | "quota-aware" | "random"
+  # round-robin: 简单轮询
+  # quota-aware: 根据剩余配额选择账号 (推荐)
+  # random: 随机选择
+  strategy: "quota-aware"
+
+  # 当前账号配额低于此阈值时切换到下一个账号
+  switchThreshold: 10.0
+
+# 日志配置
+logging:
+  # 是否记录详细的重试日志
+  verbose: false
+
+  # 日志文件路径 (留空则只输出到控制台)
+  logFile: ""
+
+# 备注:
+# 1. 此配置文件会被 sync-and-build.ps1 自动备份和恢复
+# 2. 修改此文件后需要重启服务生效
+# 3. 如果你有多个 Antigravity 账号，quota-aware 策略会自动选择配额最多的账号
