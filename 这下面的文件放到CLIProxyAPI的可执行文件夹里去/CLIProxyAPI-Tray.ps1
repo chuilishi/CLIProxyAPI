@@ -5,9 +5,10 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $exePath = "D:\CliProxyAPI\cli-proxy-api.exe"
+$workDir = "D:\CliProxyAPI"
 
 # Start main process (hidden window)
-$process = Start-Process -FilePath $exePath -WindowStyle Hidden -PassThru
+$process = Start-Process -FilePath $exePath -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
 
 # Create tray icon
 $trayIcon = New-Object System.Windows.Forms.NotifyIcon
@@ -38,7 +39,7 @@ $menuRestart.Text = "Restart"
 $menuRestart.Add_Click({
     $script:process | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1
-    $script:process = Start-Process -FilePath $exePath -WindowStyle Hidden -PassThru
+    $script:process = Start-Process -FilePath $exePath -WorkingDirectory $workDir -WindowStyle Hidden -PassThru
     $trayIcon.Text = "CLIProxyAPI (PID: $($script:process.Id))"
     $menuStatus.Text = "Running (PID: $($script:process.Id))"
     $trayIcon.ShowBalloonTip(2000, "CLIProxyAPI", "Service restarted", [System.Windows.Forms.ToolTipIcon]::Info)
