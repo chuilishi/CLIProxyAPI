@@ -82,11 +82,27 @@ try {
         }
 
         Write-Success "上游代码已合并"
-    } else {
+    }
+    else {
         Write-Success "已是最新版本"
     }
 
-    # ============ 2. 编译项目 ============
+    # ============ 2. 停止旧进程（编译前必须停止，否则文件被锁定无法覆盖） ============
+    $processName = "cli-proxy-api"
+    $existingProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
+
+    if ($existingProcess) {
+        Write-Info "停止旧进程 (PID: $($existingProcess.Id))..."
+        Stop-Process -Name $processName -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 1
+    }
+
+    # 也停止旧的托盘 PowerShell 进程
+    Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object {
+        $_.MainWindowTitle -eq "" -and $_.CommandLine -match "CLIProxyAPI-Tray"
+    } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+    # ============ 3. 编译项目 ============
     Write-Info "编译项目..."
 
     # 确保输出目录存在
@@ -116,35 +132,36 @@ try {
     $sizeMB = [math]::Round((Get-Item $OutputPath).Length / 1MB, 2)
     Write-Success "编译成功 ($sizeMB MB, ${buildTime}s)"
 
-    # ============ 3. 重启服务 ============
-    Write-Info "重启服务..."
-
-    $processName = "cli-proxy-api"
-    $existingProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
-
-    if ($existingProcess) {
-        Write-Info "停止旧进程 (PID: $($existingProcess.Id))..."
-        Stop-Process -Name $processName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 1
+    # 复制附属脚本到输出目录
+    $ScriptsSource = Join-Path $ProjectRoot "这下面的文件放到CLIProxyAPI的可执行文件夹里去"
+    if (Test-Path $ScriptsSource) {
+        $scriptFiles = Get-ChildItem -Path $ScriptsSource -File
+        if ($scriptFiles) {
+            Write-Info "复制附属脚本到输出目录..."
+            foreach ($file in $scriptFiles) {
+                Copy-Item -Path $file.FullName -Destination $OutputDir -Force
+            }
+            Write-Success "已复制 $($scriptFiles.Count) 个脚本文件"
+        }
     }
 
-    # 也停止旧的托盘 PowerShell 进程
-    Get-Process -Name "powershell" -ErrorAction SilentlyContinue | Where-Object {
-        $_.MainWindowTitle -eq "" -and $_.CommandLine -match "CLIProxyAPI-Tray"
-    } | Stop-Process -Force -ErrorAction SilentlyContinue
+    # ============ 4. 启动服务 ============
+    Write-Info "启动服务..."
 
     # 通过 VBS 静默启动托盘版本
     $vbsPath = Join-Path $OutputDir "CLIProxyAPI-Silent.vbs"
     if (Test-Path $vbsPath) {
         & wscript.exe $vbsPath
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 5  # VBS→PowerShell→exe 启动链需要更多时间
         $newProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
         if ($newProcess) {
             Write-Success "服务已启动 (PID: $($newProcess.Id)) [托盘模式]"
-        } else {
+        }
+        else {
             Write-Warn "服务可能启动失败，请检查"
         }
-    } else {
+    }
+    else {
         # 备用：直接静默启动
         $WshShell = New-Object -ComObject WScript.Shell
         $WshShell.Run("`"$OutputPath`"", 0, $false)
@@ -152,22 +169,25 @@ try {
         $newProcess = Get-Process -Name $processName -ErrorAction SilentlyContinue
         if ($newProcess) {
             Write-Success "服务已启动 (PID: $($newProcess.Id))"
-        } else {
+        }
+        else {
             Write-Warn "服务可能启动失败，请检查"
         }
     }
 
-    # ============ 4. 推送到 Fork ============
+    # ============ 5. 推送到 Fork ============
     Write-Info "推送到 fork..."
 
     $pushResult = git push $OriginRemote $MainBranch 2>&1
     if ($LASTEXITCODE -eq 0) {
         Write-Success "已推送到 fork"
-    } else {
+    }
+    else {
         # 可能是没有新提交需要推送
         if ($pushResult -match "Everything up-to-date") {
             Write-Success "Fork 已是最新"
-        } else {
+        }
+        else {
             Write-Warn "推送失败: $pushResult"
         }
     }
@@ -179,6 +199,7 @@ try {
     Write-Host "=========================================" -ForegroundColor Green
     Write-Host ""
 
-} finally {
+}
+finally {
     Pop-Location
 }
