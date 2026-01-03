@@ -77,3 +77,8 @@ oauth-model-mappings:
     # Opus with thinking suffix
     - name: "gemini-claude-opus-4-5-thinking"
       alias: "claude-4-5-20251101-thinking"
+
+claude-api-key:
+  - api-key: "cr_3a5229f3b1109ef8fb8476f243e5ab071dd74c5820fe47dc52c53be98503082e" # 如果是使用官方 Claude API,无需设置 base-url
+  # - api-key: "sk-atSM..." # 可以填多个
+    base-url: "https://co.yes.vg" # 使用第三方 Claude API 中转服务端点
