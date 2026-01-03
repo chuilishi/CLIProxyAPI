@@ -57,7 +57,6 @@ type AccountRotator struct {
 	accounts      []*AccountQuotaInfo
 	currentIndex  int
 	lock          sync.RWMutex
-	lastRotation  time.Time
 }
 
 // NewAccountRotator 创建账号轮询器
@@ -118,45 +117,77 @@ func (r *AccountRotator) selectByQuota(ctx context.Context, modelName string) *c
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	// 刷新配额信息 (每30秒刷新一次)
-	if time.Since(r.lastRotation) > 30*time.Second {
-		r.refreshQuotas(ctx)
-		r.lastRotation = time.Now()
-	}
-
 	// 找到配额最多的健康账号
 	type accountScore struct {
 		info  *AccountQuotaInfo
 		quota float64
 	}
 
+	getQuota := func(acc *AccountQuotaInfo) float64 {
+		if acc.QuotaStatus == nil {
+			return -1 // 未知配额，需要刷新
+		}
+		// 查找指定模型的配额，或使用平均值
+		if q, ok := acc.QuotaStatus.ModelQuotas[modelName]; ok {
+			return q
+		}
+		// 计算平均配额
+		total := 0.0
+		count := 0
+		for _, q := range acc.QuotaStatus.ModelQuotas {
+			total += q
+			count++
+		}
+		if count > 0 {
+			return total / float64(count)
+		}
+		return 0
+	}
+
 	var candidates []accountScore
+	needRefresh := false
 
 	for _, acc := range r.accounts {
 		if !acc.IsHealthy {
 			continue
 		}
 
-		quota := 0.0
-		if acc.QuotaStatus != nil {
-			// 查找指定模型的配额，或使用平均值
-			if q, ok := acc.QuotaStatus.ModelQuotas[modelName]; ok {
-				quota = q
-			} else {
-				// 计算平均配额
-				total := 0.0
-				count := 0
-				for _, q := range acc.QuotaStatus.ModelQuotas {
-					total += q
-					count++
-				}
-				if count > 0 {
-					quota = total / float64(count)
-				}
+		quota := getQuota(acc)
+		if quota < 0 {
+			// 有账号从未检查过配额，需要刷新
+			needRefresh = true
+		}
+		candidates = append(candidates, accountScore{info: acc, quota: quota})
+	}
+
+	// 检查是否所有账号配额都不足
+	if !needRefresh && len(candidates) > 0 {
+		allLow := true
+		for _, c := range candidates {
+			if c.quota >= r.config.SwitchThreshold {
+				allLow = false
+				break
 			}
 		}
+		if allLow {
+			needRefresh = true
+		}
+	}
 
-		candidates = append(candidates, accountScore{info: acc, quota: quota})
+	// 只有在需要时才刷新配额（未初始化或全部配额不足）
+	if needRefresh {
+		log.Debugf("account rotator: refreshing quotas (all accounts low or uninitialized)")
+		r.refreshQuotas(ctx)
+
+		// 重新计算配额
+		candidates = candidates[:0]
+		for _, acc := range r.accounts {
+			if !acc.IsHealthy {
+				continue
+			}
+			quota := getQuota(acc)
+			candidates = append(candidates, accountScore{info: acc, quota: quota})
+		}
 	}
 
 	if len(candidates) == 0 {

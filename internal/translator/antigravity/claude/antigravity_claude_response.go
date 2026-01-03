@@ -262,8 +262,20 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				output = output + fmt.Sprintf("data: %s\n\n\n", data)
 
 				if fcArgsResult := functionCallResult.Get("args"); fcArgsResult.Exists() {
+					// Fix for antigravity backend returning wrong parameter names
+					// When Grep tool has "description" but no "pattern", rename "description" to "pattern"
+					argsRaw := fcArgsResult.Raw
+					if fcName == "Grep" {
+						if !gjson.Get(argsRaw, "pattern").Exists() && gjson.Get(argsRaw, "description").Exists() {
+							descValue := gjson.Get(argsRaw, "description").String()
+							argsRaw, _ = sjson.Delete(argsRaw, "description")
+							argsRaw, _ = sjson.Set(argsRaw, "pattern", descValue)
+							log.Debugf("antigravity: fixed Grep args - renamed 'description' to 'pattern'")
+						}
+					}
+
 					output = output + "event: content_block_delta\n"
-					data, _ = sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex), "delta.partial_json", fcArgsResult.Raw)
+					data, _ = sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex), "delta.partial_json", argsRaw)
 					output = output + fmt.Sprintf("data: %s\n\n\n", data)
 				}
 				params.ResponseType = 3
@@ -480,7 +492,18 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 				toolBlock, _ = sjson.Set(toolBlock, "name", name)
 
 				if args := functionCall.Get("args"); args.Exists() && args.Raw != "" && gjson.Valid(args.Raw) && args.IsObject() {
-					toolBlock, _ = sjson.SetRaw(toolBlock, "input", args.Raw)
+					// Fix for antigravity backend returning wrong parameter names
+					// When Grep tool has "description" but no "pattern", rename "description" to "pattern"
+					argsRaw := args.Raw
+					if name == "Grep" {
+						if !gjson.Get(argsRaw, "pattern").Exists() && gjson.Get(argsRaw, "description").Exists() {
+							descValue := gjson.Get(argsRaw, "description").String()
+							argsRaw, _ = sjson.Delete(argsRaw, "description")
+							argsRaw, _ = sjson.Set(argsRaw, "pattern", descValue)
+							log.Debugf("antigravity: fixed Grep args - renamed 'description' to 'pattern'")
+						}
+					}
+					toolBlock, _ = sjson.SetRaw(toolBlock, "input", argsRaw)
 				}
 
 				ensureContentArray()
