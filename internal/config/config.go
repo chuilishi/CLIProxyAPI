@@ -141,7 +141,8 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "load-aware".
+	// "load-aware" prioritizes accounts with fewer inflight requests and lower latency.
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 }
 

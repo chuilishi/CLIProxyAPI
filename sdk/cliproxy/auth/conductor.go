@@ -119,6 +119,10 @@ type Manager struct {
 
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	// loadSelector caches the LoadAwareSelector if the selector implements it.
+	// Used for tracking request load (inflight requests and latency).
+	loadSelector *LoadAwareSelector
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -148,6 +152,12 @@ func (m *Manager) SetSelector(selector Selector) {
 	}
 	m.mu.Lock()
 	m.selector = selector
+	// Cache LoadAwareSelector reference if applicable
+	if ls, ok := selector.(*LoadAwareSelector); ok {
+		m.loadSelector = ls
+	} else {
+		m.loadSelector = nil
+	}
 	m.mu.Unlock()
 }
 
@@ -414,7 +424,20 @@ func (m *Manager) executeWithProvider(ctx context.Context, provider string, req 
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
 		execReq.Model, execReq.Metadata = m.applyOAuthModelMapping(auth, execReq.Model, execReq.Metadata)
+
+		// Track request load if LoadAwareSelector is enabled
+		var onRequestEnd func(bool)
+		if m.loadSelector != nil {
+			onRequestEnd = m.loadSelector.OnRequestStart(auth.ID)
+		}
+
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
+
+		// Record load tracking
+		if onRequestEnd != nil {
+			onRequestEnd(errExec == nil)
+		}
+
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			result.Error = &Error{Message: errExec.Error()}
@@ -476,7 +499,20 @@ func (m *Manager) executeCountWithProvider(ctx context.Context, provider string,
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
 		execReq.Model, execReq.Metadata = m.applyOAuthModelMapping(auth, execReq.Model, execReq.Metadata)
+
+		// Track request load if LoadAwareSelector is enabled
+		var onRequestEnd func(bool)
+		if m.loadSelector != nil {
+			onRequestEnd = m.loadSelector.OnRequestStart(auth.ID)
+		}
+
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
+
+		// Record load tracking
+		if onRequestEnd != nil {
+			onRequestEnd(errExec == nil)
+		}
+
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
 			result.Error = &Error{Message: errExec.Error()}
@@ -538,8 +574,19 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 		execReq := req
 		execReq.Model, execReq.Metadata = rewriteModelForAuth(routeModel, req.Metadata, auth)
 		execReq.Model, execReq.Metadata = m.applyOAuthModelMapping(auth, execReq.Model, execReq.Metadata)
+
+		// Track request load if LoadAwareSelector is enabled
+		var onRequestEnd func(bool)
+		if m.loadSelector != nil {
+			onRequestEnd = m.loadSelector.OnRequestStart(auth.ID)
+		}
+
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
+			// Record load tracking for failed stream start
+			if onRequestEnd != nil {
+				onRequestEnd(false)
+			}
 			rerr := &Error{Message: errStream.Error()}
 			var se cliproxyexecutor.StatusError
 			if errors.As(errStream, &se) && se != nil {
@@ -552,7 +599,7 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			continue
 		}
 		out := make(chan cliproxyexecutor.StreamChunk)
-		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk) {
+		go func(streamCtx context.Context, streamAuth *Auth, streamProvider string, streamChunks <-chan cliproxyexecutor.StreamChunk, loadTracker func(bool)) {
 			defer close(out)
 			var failed bool
 			for chunk := range streamChunks {
@@ -570,7 +617,11 @@ func (m *Manager) executeStreamWithProvider(ctx context.Context, provider string
 			if !failed {
 				m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: true})
 			}
-		}(execCtx, auth.Clone(), provider, chunks)
+			// Record load tracking when stream completes
+			if loadTracker != nil {
+				loadTracker(!failed)
+			}
+		}(execCtx, auth.Clone(), provider, chunks, onRequestEnd)
 		return out, nil
 	}
 }
