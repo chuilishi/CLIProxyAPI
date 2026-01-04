@@ -1587,6 +1587,9 @@ func (m *Manager) markRefreshPending(id string, now time.Time) bool {
 }
 
 func (m *Manager) refreshAuth(ctx context.Context, id string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	m.mu.RLock()
 	auth := m.auths[id]
 	var exec ProviderExecutor
@@ -1599,6 +1602,10 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	cloned := auth.Clone()
 	updated, err := exec.Refresh(ctx, cloned)
+	if err != nil && errors.Is(err, context.Canceled) {
+		log.Debugf("refresh canceled for %s, %s", auth.Provider, auth.ID)
+		return
+	}
 	log.Debugf("refreshed %s, %s, %v", auth.Provider, auth.ID, err)
 	now := time.Now()
 	if err != nil {
