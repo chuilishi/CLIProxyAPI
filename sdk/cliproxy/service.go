@@ -725,6 +725,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "vertex":
 		// Vertex AI Gemini supports the same model identifiers as Gemini.
@@ -848,6 +849,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 						if providerKey == "" {
 							providerKey = "openai-compatibility"
 						}
+						ms = s.applyOAuthMappings(ms, providerKey, authKind)
 						GlobalModelRegistry().RegisterClient(a.ID, providerKey, applyModelPrefixes(ms, a.Prefix, s.cfg.ForceModelPrefix))
 					} else {
 						// Ensure stale registrations are cleared when model list becomes empty.
@@ -863,7 +865,6 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 			}
 		}
 	}
-	models = applyOAuthModelMappings(s.cfg, provider, authKind, models)
 	if len(models) > 0 {
 		key := provider
 		if key == "" {
