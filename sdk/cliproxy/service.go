@@ -432,6 +432,14 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.applyRetryConfig(s.cfg)
 
+	// Initialize SmartSelector bridge for executor layer
+	if s.coreManager != nil {
+		if ss := s.coreManager.GetSmartSelector(); ss != nil {
+			executor.SetGlobalSmartSelector(ss)
+			log.Debug("SmartSelector bridge initialized for executor layer")
+		}
+	}
+
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
 			log.Warnf("failed to load auth store: %v", errLoad)
@@ -726,17 +734,21 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				models = buildVertexCompatConfigModels(entry)
 			}
 		}
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "gemini-cli":
 		models = registry.GetGeminiCLIModels()
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "aistudio":
 		models = registry.GetAIStudioModels()
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		models = executor.FetchAntigravityModels(ctx, a, s.cfg)
 		cancel()
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -748,6 +760,7 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "codex":
 		models = registry.GetOpenAIModels()
@@ -759,12 +772,15 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 				excluded = entry.ExcludedModels
 			}
 		}
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "qwen":
 		models = registry.GetQwenModels()
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	case "iflow":
 		models = registry.GetIFlowModels()
+		models = s.applyOAuthMappings(models, provider, authKind)
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
@@ -1281,4 +1297,73 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 		out = append(out, &clone)
 	}
 	return out
+}
+
+func (s *Service) applyOAuthMappings(models []*ModelInfo, provider, authKind string) []*ModelInfo {
+	if s == nil || s.coreManager == nil || len(models) == 0 {
+		return models
+	}
+	channel := coreauth.OAuthModelMappingChannel(provider, authKind)
+	if channel == "" {
+		return models
+	}
+	s.cfgMu.RLock()
+	mappings := s.cfg.OAuthModelMappings[channel]
+	s.cfgMu.RUnlock()
+	if len(mappings) == 0 {
+		return models
+	}
+
+	modelMap := make(map[string]*ModelInfo)
+	for _, m := range models {
+		modelMap[m.ID] = m
+	}
+
+	newModels := make([]*ModelInfo, 0, len(mappings))
+	for _, mapping := range mappings {
+		upstream := mapping.Name
+		alias := mapping.Alias
+		if info, ok := modelMap[upstream]; ok {
+			cloned := &ModelInfo{
+				ID:                     alias,
+				Object:                 info.Object,
+				Created:                info.Created,
+				OwnedBy:                info.OwnedBy,
+				Type:                   info.Type,
+				DisplayName:            alias,
+				Name:                   info.Name,
+				Version:                info.Version,
+				Description:            info.Description,
+				InputTokenLimit:        info.InputTokenLimit,
+				OutputTokenLimit:       info.OutputTokenLimit,
+				ContextLength:          info.ContextLength,
+				MaxCompletionTokens:    info.MaxCompletionTokens,
+				SupportedGenerationMethods: nil,
+				SupportedParameters:    nil,
+				Thinking:               nil,
+			}
+			if len(info.SupportedGenerationMethods) > 0 {
+				cloned.SupportedGenerationMethods = make([]string, len(info.SupportedGenerationMethods))
+				copy(cloned.SupportedGenerationMethods, info.SupportedGenerationMethods)
+			}
+			if len(info.SupportedParameters) > 0 {
+				cloned.SupportedParameters = make([]string, len(info.SupportedParameters))
+				copy(cloned.SupportedParameters, info.SupportedParameters)
+			}
+			if info.Thinking != nil {
+				t := *info.Thinking
+				if len(info.Thinking.Levels) > 0 {
+					t.Levels = make([]string, len(info.Thinking.Levels))
+					copy(t.Levels, info.Thinking.Levels)
+				}
+				cloned.Thinking = &t
+			}
+			newModels = append(newModels, cloned)
+		}
+	}
+
+	if len(newModels) > 0 {
+		return append(models, newModels...)
+	}
+	return models
 }
