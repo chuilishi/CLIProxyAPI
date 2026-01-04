@@ -1342,7 +1342,7 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 }
 
 func (s *Service) applyOAuthMappings(models []*ModelInfo, provider, authKind string) []*ModelInfo {
-	if s == nil || s.coreManager == nil || len(models) == 0 {
+	if s == nil || s.coreManager == nil {
 		return models
 	}
 	channel := coreauth.OAuthModelMappingChannel(provider, authKind)
@@ -1361,11 +1361,21 @@ func (s *Service) applyOAuthMappings(models []*ModelInfo, provider, authKind str
 		modelMap[m.ID] = m
 	}
 
+	// For antigravity provider, config mappings take priority - create alias models
+	// directly from config without requiring the upstream model to be in the API response.
+	// This allows config to override/supplement the API-returned model list.
+	isAntigravity := strings.EqualFold(provider, "antigravity")
+
 	newModels := make([]*ModelInfo, 0, len(mappings))
 	for _, mapping := range mappings {
-		upstream := mapping.Name
-		alias := mapping.Alias
+		upstream := strings.TrimSpace(mapping.Name)
+		alias := strings.TrimSpace(mapping.Alias)
+		if upstream == "" || alias == "" {
+			continue
+		}
+
 		if info, ok := modelMap[upstream]; ok {
+			// Found matching model in API response - clone it with alias ID
 			cloned := &ModelInfo{
 				ID:                     alias,
 				Object:                 info.Object,
@@ -1399,6 +1409,23 @@ func (s *Service) applyOAuthMappings(models []*ModelInfo, provider, authKind str
 					copy(t.Levels, info.Thinking.Levels)
 				}
 				cloned.Thinking = &t
+			}
+			newModels = append(newModels, cloned)
+		} else if isAntigravity {
+			// For antigravity: config takes priority. Create alias model directly
+			// even if upstream model not in API response. The upstream model name
+			// (mapping.Name) will be used when sending requests via OAuth model mapping.
+			now := time.Now().Unix()
+			cloned := &ModelInfo{
+				ID:          alias,
+				Object:      "model",
+				Created:     now,
+				OwnedBy:     "antigravity",
+				Type:        "antigravity",
+				DisplayName: alias,
+				Name:        upstream,
+				Version:     upstream,
+				Description: upstream,
 			}
 			newModels = append(newModels, cloned)
 		}
