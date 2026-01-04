@@ -30,14 +30,22 @@ type AccountRotationConfig struct {
 	Enabled         bool                    `yaml:"enabled" json:"enabled"`
 	Strategy        AccountRotationStrategy `yaml:"strategy" json:"strategy"`
 	SwitchThreshold float64                 `yaml:"switchThreshold" json:"switchThreshold"`
+
+	// 首字节超时配置
+	FirstByteTimeoutMs int `yaml:"firstByteTimeoutMs" json:"firstByteTimeoutMs"` // 首字节超时时间 (毫秒)，默认 10000 (10秒)
+	TimeoutPenalty     int `yaml:"timeoutPenalty" json:"timeoutPenalty"`         // 超时惩罚权重，默认 20
+	TimeoutDecayMinutes int `yaml:"timeoutDecayMinutes" json:"timeoutDecayMinutes"` // 超时惩罚衰减时间 (分钟)，默认 30
 }
 
 // DefaultAccountRotationConfig 返回默认配置
 func DefaultAccountRotationConfig() AccountRotationConfig {
 	return AccountRotationConfig{
-		Enabled:         true,
-		Strategy:        StrategyQuotaAware,
-		SwitchThreshold: 10.0,
+		Enabled:             true,
+		Strategy:            StrategyQuotaAware,
+		SwitchThreshold:     10.0,
+		FirstByteTimeoutMs:  10000, // 10秒
+		TimeoutPenalty:      20,    // 超时一次扣20分
+		TimeoutDecayMinutes: 30,    // 30分钟后惩罚衰减
 	}
 }
 
@@ -47,6 +55,13 @@ type AccountQuotaInfo struct {
 	QuotaStatus *QuotaStatus
 	LastChecked time.Time
 	IsHealthy   bool
+
+	// 首字节超时统计
+	TotalRequests      int64     // 总请求数
+	TimeoutCount       int64     // 首字节超时次数
+	LastTimeoutAt      time.Time // 最后一次超时时间
+	AvgFirstByteTimeMs float64   // 平均首字节响应时间 (毫秒)
+	RecentLatencies    []int64   // 最近的首字节延迟样本 (毫秒，最多保留10个)
 }
 
 // AccountRotator 账号轮询器
@@ -112,36 +127,15 @@ func (r *AccountRotator) SelectBestAccount(ctx context.Context, modelName string
 	}
 }
 
-// selectByQuota 根据配额选择账号
+// selectByQuota 根据配额和超时惩罚综合选择账号
 func (r *AccountRotator) selectByQuota(ctx context.Context, modelName string) *cliproxyauth.Auth {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
-	// 找到配额最多的健康账号
+	// 找到综合评分最高的健康账号
 	type accountScore struct {
 		info  *AccountQuotaInfo
-		quota float64
-	}
-
-	getQuota := func(acc *AccountQuotaInfo) float64 {
-		if acc.QuotaStatus == nil {
-			return -1 // 未知配额，需要刷新
-		}
-		// 查找指定模型的配额，或使用平均值
-		if q, ok := acc.QuotaStatus.ModelQuotas[modelName]; ok {
-			return q
-		}
-		// 计算平均配额
-		total := 0.0
-		count := 0
-		for _, q := range acc.QuotaStatus.ModelQuotas {
-			total += q
-			count++
-		}
-		if count > 0 {
-			return total / float64(count)
-		}
-		return 0
+		score float64 // 综合评分 = 配额分数 - 超时惩罚
 	}
 
 	var candidates []accountScore
@@ -152,19 +146,21 @@ func (r *AccountRotator) selectByQuota(ctx context.Context, modelName string) *c
 			continue
 		}
 
-		quota := getQuota(acc)
-		if quota < 0 {
-			// 有账号从未检查过配额，需要刷新
+		// 检查是否需要刷新配额
+		if acc.QuotaStatus == nil {
 			needRefresh = true
 		}
-		candidates = append(candidates, accountScore{info: acc, quota: quota})
+
+		// 计算综合评分
+		score := r.calculateAccountScore(acc, modelName)
+		candidates = append(candidates, accountScore{info: acc, score: score})
 	}
 
 	// 检查是否所有账号配额都不足
 	if !needRefresh && len(candidates) > 0 {
 		allLow := true
 		for _, c := range candidates {
-			if c.quota >= r.config.SwitchThreshold {
+			if c.score >= r.config.SwitchThreshold {
 				allLow = false
 				break
 			}
@@ -179,14 +175,14 @@ func (r *AccountRotator) selectByQuota(ctx context.Context, modelName string) *c
 		log.Debugf("account rotator: refreshing quotas (all accounts low or uninitialized)")
 		r.refreshQuotas(ctx)
 
-		// 重新计算配额
+		// 重新计算评分
 		candidates = candidates[:0]
 		for _, acc := range r.accounts {
 			if !acc.IsHealthy {
 				continue
 			}
-			quota := getQuota(acc)
-			candidates = append(candidates, accountScore{info: acc, quota: quota})
+			score := r.calculateAccountScore(acc, modelName)
+			candidates = append(candidates, accountScore{info: acc, score: score})
 		}
 	}
 
@@ -198,16 +194,16 @@ func (r *AccountRotator) selectByQuota(ctx context.Context, modelName string) *c
 		return nil
 	}
 
-	// 按配额排序
+	// 按综合评分排序 (评分高的优先)
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].quota > candidates[j].quota
+		return candidates[i].score > candidates[j].score
 	})
 
 	best := candidates[0]
 
-	// 如果最佳账号配额低于阈值，记录警告
-	if best.quota < r.config.SwitchThreshold {
-		log.Warnf("account rotator: best account %s has low quota: %.1f%%", best.info.Auth.ID, best.quota)
+	// 如果最佳账号评分低于阈值，记录警告
+	if best.score < r.config.SwitchThreshold {
+		log.Warnf("account rotator: best account %s has low score: %.1f (quota - timeout penalty)", best.info.Auth.ID, best.score)
 	}
 
 	return best.info.Auth
@@ -313,10 +309,14 @@ func (r *AccountRotator) GetAccountStats() []map[string]interface{} {
 	stats := make([]map[string]interface{}, 0, len(r.accounts))
 	for _, acc := range r.accounts {
 		stat := map[string]interface{}{
-			"id":          acc.Auth.ID,
-			"label":       acc.Auth.Label,
-			"isHealthy":   acc.IsHealthy,
-			"lastChecked": acc.LastChecked,
+			"id":                 acc.Auth.ID,
+			"label":              acc.Auth.Label,
+			"isHealthy":          acc.IsHealthy,
+			"lastChecked":        acc.LastChecked,
+			"totalRequests":      acc.TotalRequests,
+			"timeoutCount":       acc.TimeoutCount,
+			"lastTimeoutAt":      acc.LastTimeoutAt,
+			"avgFirstByteTimeMs": acc.AvgFirstByteTimeMs,
 		}
 
 		if acc.QuotaStatus != nil {
@@ -345,4 +345,156 @@ func GetAccountRotator(cfg *config.Config) *AccountRotator {
 		globalAccountRotator = NewAccountRotator(cfg)
 	})
 	return globalAccountRotator
+}
+
+// ================================================================
+// 首字节超时相关方法
+// ================================================================
+
+// RecordFirstByteLatency 记录首字节响应延迟
+func (r *AccountRotator) RecordFirstByteLatency(authID string, latencyMs int64) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	for _, acc := range r.accounts {
+		if acc.Auth.ID == authID {
+			acc.TotalRequests++
+
+			// 更新最近延迟样本 (保留最近10个)
+			if acc.RecentLatencies == nil {
+				acc.RecentLatencies = make([]int64, 0, 10)
+			}
+			if len(acc.RecentLatencies) >= 10 {
+				acc.RecentLatencies = acc.RecentLatencies[1:]
+			}
+			acc.RecentLatencies = append(acc.RecentLatencies, latencyMs)
+
+			// 计算平均延迟
+			var sum int64
+			for _, l := range acc.RecentLatencies {
+				sum += l
+			}
+			acc.AvgFirstByteTimeMs = float64(sum) / float64(len(acc.RecentLatencies))
+
+			log.Debugf("account rotator: recorded latency %dms for account %s (avg: %.1fms)",
+				latencyMs, authID, acc.AvgFirstByteTimeMs)
+			return
+		}
+	}
+}
+
+// RecordFirstByteTimeout 记录首字节超时事件
+func (r *AccountRotator) RecordFirstByteTimeout(authID string) {
+	r.lock.Lock()
+	defer r.lock.Unlock()
+
+	for _, acc := range r.accounts {
+		if acc.Auth.ID == authID {
+			acc.TotalRequests++
+			acc.TimeoutCount++
+			acc.LastTimeoutAt = time.Now()
+
+			log.Warnf("account rotator: recorded first byte timeout for account %s (total timeouts: %d)",
+				authID, acc.TimeoutCount)
+			return
+		}
+	}
+}
+
+// GetTimeoutPenalty 获取账号的超时惩罚分数
+// 惩罚分数会随时间衰减
+func (r *AccountRotator) GetTimeoutPenalty(authID string) float64 {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	for _, acc := range r.accounts {
+		if acc.Auth.ID == authID {
+			return r.calculateTimeoutPenalty(acc)
+		}
+	}
+	return 0
+}
+
+// calculateTimeoutPenalty 计算超时惩罚分数
+func (r *AccountRotator) calculateTimeoutPenalty(acc *AccountQuotaInfo) float64 {
+	if acc.TimeoutCount == 0 {
+		return 0
+	}
+
+	// 基础惩罚 = 超时次数 * 惩罚权重
+	basePenalty := float64(acc.TimeoutCount) * float64(r.config.TimeoutPenalty)
+
+	// 计算衰减系数 (根据最后一次超时的时间)
+	if acc.LastTimeoutAt.IsZero() {
+		return basePenalty
+	}
+
+	minutesSinceTimeout := time.Since(acc.LastTimeoutAt).Minutes()
+	decayMinutes := float64(r.config.TimeoutDecayMinutes)
+	if decayMinutes <= 0 {
+		decayMinutes = 30
+	}
+
+	// 使用指数衰减: penalty * exp(-t/decay)
+	decayFactor := 1.0
+	if minutesSinceTimeout > 0 {
+		decayFactor = 1.0 / (1.0 + minutesSinceTimeout/decayMinutes)
+	}
+
+	return basePenalty * decayFactor
+}
+
+// GetFirstByteTimeoutDuration 获取首字节超时时间
+func (r *AccountRotator) GetFirstByteTimeoutDuration() time.Duration {
+	if r.config.FirstByteTimeoutMs <= 0 {
+		return 10 * time.Second // 默认10秒
+	}
+	return time.Duration(r.config.FirstByteTimeoutMs) * time.Millisecond
+}
+
+// GetAccountScore 获取账号综合评分 (配额 - 超时惩罚)
+func (r *AccountRotator) GetAccountScore(authID string, modelName string) float64 {
+	r.lock.RLock()
+	defer r.lock.RUnlock()
+
+	for _, acc := range r.accounts {
+		if acc.Auth.ID == authID {
+			return r.calculateAccountScore(acc, modelName)
+		}
+	}
+	return 0
+}
+
+// calculateAccountScore 计算账号综合评分
+func (r *AccountRotator) calculateAccountScore(acc *AccountQuotaInfo, modelName string) float64 {
+	// 基础分数: 配额百分比 (0-100)
+	baseScore := 50.0 // 默认50分 (未知配额)
+
+	if acc.QuotaStatus != nil {
+		if q, ok := acc.QuotaStatus.ModelQuotas[modelName]; ok {
+			baseScore = q
+		} else {
+			// 计算平均配额
+			total := 0.0
+			count := 0
+			for _, q := range acc.QuotaStatus.ModelQuotas {
+				total += q
+				count++
+			}
+			if count > 0 {
+				baseScore = total / float64(count)
+			}
+		}
+	}
+
+	// 扣除超时惩罚
+	penalty := r.calculateTimeoutPenalty(acc)
+	finalScore := baseScore - penalty
+
+	// 不健康的账号得分为负
+	if !acc.IsHealthy {
+		finalScore = -100
+	}
+
+	return finalScore
 }

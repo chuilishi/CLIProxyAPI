@@ -10,6 +10,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -210,6 +211,10 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
+	// Get first byte timeout configuration from account rotator
+	accountRotator := GetAccountRotator(e.cfg)
+	firstByteTimeout := accountRotator.GetFirstByteTimeoutDuration()
+
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
@@ -221,12 +226,52 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 			return resp, err
 		}
 
-		httpResp, errDo := httpClient.Do(httpReq)
+		// Use first byte timeout wrapper for the request
+		authID := ""
+		if auth != nil {
+			authID = auth.ID
+		}
+		startTime := time.Now()
+
+		httpResp, errDo := StreamWithFirstByteTimeout(
+			ctx,
+			httpClient,
+			httpReq,
+			firstByteTimeout,
+			func() {
+				// On timeout callback
+				if authID != "" {
+					accountRotator.RecordFirstByteTimeout(authID)
+				}
+				log.Warnf("antigravity executor: first byte timeout after %v for auth %s on base url %s",
+					firstByteTimeout, authID, baseURL)
+			},
+			func(latencyMs int64) {
+				// On first byte callback
+				if authID != "" {
+					accountRotator.RecordFirstByteLatency(authID, latencyMs)
+				}
+			},
+		)
+
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
+
+			// Check if this is a first byte timeout
+			if errors.Is(errDo, ErrFirstByteTimeout) {
+				log.Warnf("antigravity executor: first byte timeout on base url %s after %v, switching...",
+					baseURL, time.Since(startTime))
+				if idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: retrying with fallback base url: %s", baseURLs[idx+1])
+					continue
+				}
+				err = statusErr{code: http.StatusGatewayTimeout, msg: "first byte timeout: no response from upstream"}
+				return resp, err
+			}
+
 			if idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -551,6 +596,10 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 
+	// Get first byte timeout configuration from account rotator
+	accountRotator := GetAccountRotator(e.cfg)
+	firstByteTimeout := accountRotator.GetFirstByteTimeoutDuration()
+
 	var lastStatus int
 	var lastBody []byte
 	var lastErr error
@@ -562,12 +611,54 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 			return nil, err
 		}
 
-		httpResp, errDo := httpClient.Do(httpReq)
+		// Use first byte timeout wrapper for the request
+		authID := ""
+		if auth != nil {
+			authID = auth.ID
+		}
+		startTime := time.Now()
+
+		httpResp, errDo := StreamWithFirstByteTimeout(
+			ctx,
+			httpClient,
+			httpReq,
+			firstByteTimeout,
+			func() {
+				// On timeout callback
+				if authID != "" {
+					accountRotator.RecordFirstByteTimeout(authID)
+				}
+				log.Warnf("antigravity executor: first byte timeout after %v for auth %s on base url %s",
+					firstByteTimeout, authID, baseURL)
+			},
+			func(latencyMs int64) {
+				// On first byte callback
+				if authID != "" {
+					accountRotator.RecordFirstByteLatency(authID, latencyMs)
+				}
+			},
+		)
+
 		if errDo != nil {
 			recordAPIResponseError(ctx, e.cfg, errDo)
 			lastStatus = 0
 			lastBody = nil
 			lastErr = errDo
+
+			// Check if this is a first byte timeout
+			if errors.Is(errDo, ErrFirstByteTimeout) {
+				log.Warnf("antigravity executor: first byte timeout on base url %s after %v, switching...",
+					baseURL, time.Since(startTime))
+				// Continue to next base URL or return error
+				if idx+1 < len(baseURLs) {
+					log.Debugf("antigravity executor: retrying with fallback base url: %s", baseURLs[idx+1])
+					continue
+				}
+				// Return timeout error with clear message
+				err = statusErr{code: http.StatusGatewayTimeout, msg: "first byte timeout: no response from upstream"}
+				return nil, err
+			}
+
 			if idx+1 < len(baseURLs) {
 				log.Debugf("antigravity executor: request error on base url %s, retrying with fallback base url: %s", baseURL, baseURLs[idx+1])
 				continue
@@ -1283,22 +1374,24 @@ func generateProjectID() string {
 }
 
 func modelName2Alias(modelName string) string {
+	// Model name mappings are now handled via config file (oauth-model-mappings)
+	// Filter out internal/test models that shouldn't be exposed
+	//
+	// Antigravity API available models (for reference):
+	//   - claude-opus-4-5-thinking
+	//   - claude-sonnet-4-5-thinking
+	//   - claude-sonnet-4-5
+	//   - gemini-2.5-flash
+	//   - gemini-2.5-flash-lite
+	//   - gemini-2.5-pro
+	//   - gemini-3-flash
+	//   - gemini-3-pro-high
+	//   - gemini-3-pro-low
+	//   - gemini-3-pro-image
+	//   - rev19-uic3-1p (computer use preview)
+	//   - gpt-oss-120b-medium
 	switch modelName {
-	case "rev19-uic3-1p":
-		return "gemini-2.5-computer-use-preview-10-2025"
-	case "gemini-3-pro-image":
-		return "gemini-3-pro-image-preview"
-	case "gemini-3-pro-high":
-		return "gemini-3-pro-preview"
-	case "gemini-3-flash":
-		return "gemini-3-flash-preview"
-	case "claude-sonnet-4-5":
-		return "gemini-claude-sonnet-4-5"
-	case "claude-sonnet-4-5-thinking":
-		return "gemini-claude-sonnet-4-5-thinking"
-	case "claude-opus-4-5-thinking":
-		return "gemini-claude-opus-4-5-thinking"
-	case "chat_20706", "chat_23310", "gemini-2.5-flash-thinking", "gemini-3-pro-low", "gemini-2.5-pro":
+	case "chat_20706", "chat_23310":
 		return ""
 	default:
 		return modelName
@@ -1306,24 +1399,9 @@ func modelName2Alias(modelName string) string {
 }
 
 func alias2ModelName(modelName string) string {
-	switch modelName {
-	case "gemini-2.5-computer-use-preview-10-2025":
-		return "rev19-uic3-1p"
-	case "gemini-3-pro-image-preview":
-		return "gemini-3-pro-image"
-	case "gemini-3-pro-preview":
-		return "gemini-3-pro-high"
-	case "gemini-3-flash-preview":
-		return "gemini-3-flash"
-	case "gemini-claude-sonnet-4-5":
-		return "claude-sonnet-4-5"
-	case "gemini-claude-sonnet-4-5-thinking":
-		return "claude-sonnet-4-5-thinking"
-	case "gemini-claude-opus-4-5-thinking":
-		return "claude-opus-4-5-thinking"
-	default:
-		return modelName
-	}
+	// Model name mappings are now handled via config file (oauth-model-mappings)
+	// This function now just passes through the model name
+	return modelName
 }
 
 // normalizeAntigravityThinking clamps or removes thinking config based on model support.

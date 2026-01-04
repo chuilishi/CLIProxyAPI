@@ -46,7 +46,7 @@ tls:
 # Management API settings
 remote-management:
   allow-remote: false
-  secret-key: ""
+  secret-key: "admin"
   disable-control-panel: false
 
 # When false, disable in-memory usage statistics aggregation
@@ -59,26 +59,43 @@ logging-to-file: false
 # proxy-url: "socks5://127.0.0.1:1080"
 
 # OAuth model name mappings for Antigravity + Claude Code
-# Maps Claude Code's official model names to Antigravity's Gemini 3 models
+# Maps Claude Code's official model names to Antigravity API's actual model names
+#
+# Antigravity API available models:
+#   - claude-opus-4-5-thinking
+#   - claude-sonnet-4-5-thinking
+#   - claude-sonnet-4-5
+#   - gemini-2.5-flash
+#   - gemini-2.5-flash-lite
+#   - gemini-2.5-pro
+#   - gemini-3-flash
+#   - gemini-3-pro-high
+#   - gemini-3-pro-low
+#   - gemini-3-pro-image
+#   - rev19-uic3-1p (computer use preview)
+#   - gpt-oss-120b-medium
+#
 oauth-model-mappings:
   antigravity:
-    # Claude Opus -> Antigravity's gemini-claude-opus with thinking
-    - name: "gemini-claude-opus-4-5-thinking"
+    # Antigravity支持的模型名称 -> claudecode请求的时候使用的名字
+
+    # Claude Opus 4.5 -> claude-opus-4-5-thinking (with extended thinking)
+    - name: "claude-opus-4-5-thinking"
       alias: "claude-opus-4-5-20251101"
-    # Claude Sonnet -> Gemini 3 Pro Preview
-    - name: "gemini-3-pro-preview"
+    # Claude Sonnet 4.5 -> claude-sonnet-4-5-thinking (with extended thinking)
+    - name: "claude-sonnet-4-5-thinking"
       alias: "claude-sonnet-4-5-20250929"
-    # Claude Haiku -> Gemini 3 Flash Preview
-    - name: "gemini-3-flash-preview"
+    # Claude Haiku -> gemini-3-flash (no Claude Haiku available, use Gemini as fallback)
+    - name: "gemini-3-flash"
       alias: "claude-haiku-4-5-20251001"
-    # Sonnet with thinking suffix -> Gemini 3 Pro Preview
-    - name: "gemini-3-pro-preview"
+    # Sonnet with thinking suffix
+    - name: "claude-sonnet-4-5-thinking"
       alias: "claude-sonnet-4-5-20250929-thinking"
     # Opus with thinking suffix
-    - name: "gemini-claude-opus-4-5-thinking"
+    - name: "claude-opus-4-5-thinking"
       alias: "claude-4-5-20251101-thinking"
 
-claude-api-key:
-  - api-key: "cr_3a5229f3b1109ef8fb8476f243e5ab071dd74c5820fe47dc52c53be98503082e" # 如果是使用官方 Claude API,无需设置 base-url
-  # - api-key: "sk-atSM..." # 可以填多个
-    base-url: "https://co.yes.vg" # 使用第三方 Claude API 中转服务端点
+# claude-api-key:
+#   - api-key: "cr_3a5229f3b1109ef8fb8476f243e5ab071dd74c5820fe47dc52c53be98503082e" # 如果是使用官方 Claude API,无需设置 base-url
+#   # - api-key: "sk-atSM..." # 可以填多个
+#     base-url: "https://co.yes.vg" # 使用第三方 Claude API 中转服务端点

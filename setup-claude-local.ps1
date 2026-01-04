@@ -177,9 +177,11 @@ function New-Settings {
             CLAUDE_CODE_MAX_OUTPUT_TOKENS            = 200000
             DISABLE_TELEMETRY                        = 1
             DISABLE_ERROR_REPORTING                  = 1
-            CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = 1
             CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = 1
             MAX_THINKING_TOKENS                      = 10000
+            CLAUDE_CODE_DISABLE_TERMINAL_TITLE       = 1
+            DISABLE_NON_ESSENTIAL_MODEL_CALLS        = 1
+            DISABLE_COST_WARNINGS                    = 1
         }
         model = "opus"
     }
