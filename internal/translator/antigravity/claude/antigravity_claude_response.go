@@ -9,6 +9,10 @@ package claude
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -20,6 +24,24 @@ import (
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// WebSearchResult represents a single web search result from grounding.
+type WebSearchResult struct {
+	Type             string `json:"type"`
+	Title            string `json:"title"`
+	URL              string `json:"url"`
+	EncryptedContent string `json:"encrypted_content"`
+	PageAge          *int   `json:"page_age"`
+}
+
+// WebSearchState holds the accumulated web search/grounding data during streaming.
+type WebSearchState struct {
+	ToolUseID         string                   // Unique ID for the server_tool_use block
+	Query             string                   // The search query extracted from grounding metadata
+	Results           []WebSearchResult        // Parsed grounding chunks as web search results
+	Supports          []gjson.Result           // Raw grounding supports for building citations
+	BufferedTextParts []string                 // Non-thinking text buffered until stream end
+}
 
 // Params holds parameters for response conversion and maintains state across streaming chunks.
 // This structure tracks the current state of the response translation process to ensure
@@ -43,10 +65,58 @@ type Params struct {
 	// Signature caching support
 	SessionID           string          // Session ID derived from request for signature caching
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
+
+	// Web search (grounding) mode support
+	WebSearchMode bool           // Indicates if web search grounding is active
+	WebSearch     WebSearchState // Accumulated grounding data
 }
 
 // toolUseIDCounter provides a process-wide unique counter for tool use identifiers.
 var toolUseIDCounter uint64
+
+// processThinkingPart processes a thinking part and outputs the appropriate SSE events.
+// This is extracted to be reusable in both normal and web search modes.
+func processThinkingPart(params *Params, output *string, partResult, partTextResult gjson.Result) {
+	if thoughtSignature := partResult.Get("thoughtSignature"); thoughtSignature.Exists() && thoughtSignature.String() != "" {
+		log.Debug("Branch: signature_delta (web search mode)")
+
+		if params.SessionID != "" && params.CurrentThinkingText.Len() > 0 {
+			cache.CacheSignature(params.SessionID, params.CurrentThinkingText.String(), thoughtSignature.String())
+			log.Debugf("Cached signature for thinking block (sessionID=%s, textLen=%d)", params.SessionID, params.CurrentThinkingText.Len())
+			params.CurrentThinkingText.Reset()
+		}
+
+		*output = *output + "event: content_block_delta\n"
+		data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"signature_delta","signature":""}}`, params.ResponseIndex), "delta.signature", thoughtSignature.String())
+		*output = *output + fmt.Sprintf("data: %s\n\n\n", data)
+		params.HasContent = true
+	} else if params.ResponseType == 2 { // Continue existing thinking block
+		params.CurrentThinkingText.WriteString(partTextResult.String())
+		*output = *output + "event: content_block_delta\n"
+		data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
+		*output = *output + fmt.Sprintf("data: %s\n\n\n", data)
+		params.HasContent = true
+	} else {
+		// Transition to thinking state
+		if params.ResponseType != 0 {
+			*output = *output + "event: content_block_stop\n"
+			*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+			*output = *output + "\n\n\n"
+			params.ResponseIndex++
+		}
+
+		*output = *output + "event: content_block_start\n"
+		*output = *output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"thinking","thinking":""}}`, params.ResponseIndex)
+		*output = *output + "\n\n\n"
+		*output = *output + "event: content_block_delta\n"
+		data, _ := sjson.Set(fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"thinking_delta","thinking":""}}`, params.ResponseIndex), "delta.thinking", partTextResult.String())
+		*output = *output + fmt.Sprintf("data: %s\n\n\n", data)
+		params.ResponseType = 2
+		params.HasContent = true
+		params.CurrentThinkingText.Reset()
+		params.CurrentThinkingText.WriteString(partTextResult.String())
+	}
+}
 
 // ConvertAntigravityResponseToClaude performs sophisticated streaming response format conversion.
 // This function implements a complex state machine that translates backend client responses
@@ -119,12 +189,43 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		params.HasFirstResponse = true
 	}
 
+	// Check for grounding data (web search mode)
+	if !params.WebSearchMode && hasGroundingData(rawJSON) {
+		params.WebSearchMode = true
+		params.WebSearch.ToolUseID = makeServerToolUseID()
+		log.Debug("Web search grounding mode activated")
+	}
+
+	// Update grounding state if in web search mode
+	if params.WebSearchMode {
+		updateWebSearchStateFromResponse(params, rawJSON)
+	}
+
 	// Process the response parts array from the backend client
 	// Each part can contain text content, thinking content, or function calls
 	partsResult := gjson.GetBytes(rawJSON, "response.candidates.0.content.parts")
 	if partsResult.IsArray() {
 		partResults := partsResult.Array()
-		for i := 0; i < len(partResults); i++ {
+
+		// In web search mode, buffer non-thinking text and output thinking in real-time
+		if params.WebSearchMode {
+			for i := 0; i < len(partResults); i++ {
+				partResult := partResults[i]
+				partTextResult := partResult.Get("text")
+
+				if partTextResult.Exists() {
+					if partResult.Get("thought").Bool() {
+						// Output thinking content in real-time (same as normal mode)
+						processThinkingPart(params, &output, partResult, partTextResult)
+					} else {
+						// Buffer non-thinking text for later output
+						params.WebSearch.BufferedTextParts = append(params.WebSearch.BufferedTextParts, partTextResult.String())
+					}
+				}
+			}
+		} else {
+			// Normal mode: process all parts normally
+			for i := 0; i < len(partResults); i++ {
 			partResult := partResults[i]
 
 			// Extract the different types of content from each part
@@ -270,6 +371,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 				params.HasContent = true
 			}
 		}
+		} // Close the else branch for normal mode
 	}
 
 	if finishReasonResult := gjson.GetBytes(rawJSON, "response.candidates.0.finishReason"); finishReasonResult.Exists() {
@@ -309,15 +411,22 @@ func appendFinalEvents(params *Params, output *string, force bool) {
 	}
 
 	// Only send final events if we have actually output content
-	if !params.HasContent {
+	if !params.HasContent && !params.WebSearchMode {
 		return
 	}
 
-	if params.ResponseType != 0 {
-		*output = *output + "event: content_block_stop\n"
-		*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
-		*output = *output + "\n\n\n"
-		params.ResponseType = 0
+	// In web search mode, emit the web search blocks before the final message
+	if params.WebSearchMode {
+		emitWebSearchBlocks(params, output)
+		params.HasContent = true // Ensure we mark content as present
+	} else {
+		// Normal mode: close any open content block
+		if params.ResponseType != 0 {
+			*output = *output + "event: content_block_stop\n"
+			*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+			*output = *output + "\n\n\n"
+			params.ResponseType = 0
+		}
 	}
 
 	stopReason := resolveStopReason(params)
@@ -491,7 +600,63 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 	}
 
 	flushThinking()
-	flushText()
+
+	// Check for grounding data (web search mode)
+	webSearchMode := hasGroundingData(rawJSON)
+	if webSearchMode {
+		// In web search mode, the text is buffered and output after web search blocks
+		bufferedText := textBuilder.String()
+		textBuilder.Reset()
+
+		// Parse grounding data
+		groundingMetadata := root.Get("response.candidates.0.groundingMetadata")
+		chunks := groundingMetadata.Get("groundingChunks").Array()
+		supports := groundingMetadata.Get("groundingSupports").Array()
+		query := groundingMetadata.Get("searchEntryPoint.renderedContent").String()
+		if query == "" {
+			query = groundingMetadata.Get("webSearchQueries.0").String()
+		}
+
+		// Generate tool use ID
+		toolUseID := makeServerToolUseID()
+		results := toWebSearchResults(chunks)
+
+		// 1. server_tool_use block
+		serverToolBlock := `{"type":"server_tool_use","id":"","name":"web_search","input":{}}`
+		serverToolBlock, _ = sjson.Set(serverToolBlock, "id", toolUseID)
+		serverToolBlock, _ = sjson.Set(serverToolBlock, "input.query", query)
+		ensureContentArray()
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", serverToolBlock)
+
+		// 2. web_search_tool_result block
+		resultsBytes, _ := json.Marshal(results)
+		toolResultBlock := `{"type":"web_search_tool_result","tool_use_id":"","content":[]}`
+		toolResultBlock, _ = sjson.Set(toolResultBlock, "tool_use_id", toolUseID)
+		toolResultBlock, _ = sjson.SetRaw(toolResultBlock, "content", string(resultsBytes))
+		responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", toolResultBlock)
+
+		// 3. Citation blocks
+		for _, support := range supports {
+			citation, ok := buildCitationFromSupport(results, support)
+			if !ok {
+				continue
+			}
+			citedText := support.Get("segment.text").String()
+			textBlock := `{"type":"text","text":"","citations":[]}`
+			textBlock, _ = sjson.Set(textBlock, "text", citedText)
+			textBlock, _ = sjson.SetRaw(textBlock, "citations.-1", citation)
+			responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", textBlock)
+		}
+
+		// 4. Final text block with main content
+		if bufferedText != "" {
+			block := `{"type":"text","text":""}`
+			block, _ = sjson.Set(block, "text", bufferedText)
+			responseJSON, _ = sjson.SetRaw(responseJSON, "content.-1", block)
+		}
+	} else {
+		flushText()
+	}
 
 	stopReason := "end_turn"
 	if hasToolCall {
@@ -521,4 +686,222 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 func ClaudeTokenCount(ctx context.Context, count int64) string {
 	return fmt.Sprintf(`{"input_tokens":%d}`, count)
+}
+
+// makeServerToolUseID generates a unique ID for server_tool_use blocks.
+func makeServerToolUseID() string {
+	b := make([]byte, 12)
+	_, _ = rand.Read(b)
+	return "srvtoolu_" + hex.EncodeToString(b)
+}
+
+// stableEncryptedContent creates a stable base64-encoded JSON for encrypted_content field.
+func stableEncryptedContent(url, title, citedText string) string {
+	payload := map[string]string{"url": url, "title": title}
+	if citedText != "" {
+		payload["cited_text"] = citedText
+	}
+	data, _ := json.Marshal(payload)
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// toWebSearchResults converts grounding chunks to WebSearchResult array.
+func toWebSearchResults(chunks []gjson.Result) []WebSearchResult {
+	var results []WebSearchResult
+	for _, chunk := range chunks {
+		web := chunk.Get("web")
+		if !web.Exists() {
+			continue
+		}
+		uri := web.Get("uri").String()
+		title := web.Get("title").String()
+		if title == "" {
+			title = web.Get("domain").String()
+		}
+		if uri == "" && title == "" {
+			continue
+		}
+		results = append(results, WebSearchResult{
+			Type:             "web_search_result",
+			Title:            title,
+			URL:              uri,
+			EncryptedContent: stableEncryptedContent(uri, title, ""),
+			PageAge:          nil,
+		})
+	}
+	return results
+}
+
+// hasGroundingData checks if the candidate contains any grounding metadata.
+func hasGroundingData(rawJSON []byte) bool {
+	candidate := gjson.GetBytes(rawJSON, "response.candidates.0")
+	if !candidate.Exists() {
+		return false
+	}
+	if candidate.Get("groundingMetadata").Exists() {
+		return true
+	}
+	if candidate.Get("groundingChunks").Exists() {
+		return true
+	}
+	if candidate.Get("groundingSupports").Exists() {
+		return true
+	}
+	return false
+}
+
+// updateWebSearchStateFromResponse extracts grounding data from the response and updates state.
+func updateWebSearchStateFromResponse(params *Params, rawJSON []byte) {
+	candidate := gjson.GetBytes(rawJSON, "response.candidates.0")
+	if !candidate.Exists() {
+		return
+	}
+
+	// Extract search query
+	queries := candidate.Get("groundingMetadata.webSearchQueries")
+	if queries.IsArray() && len(queries.Array()) > 0 {
+		if q := queries.Array()[0].String(); q != "" {
+			params.WebSearch.Query = q
+		}
+	}
+
+	// Extract grounding chunks (search results)
+	chunks := candidate.Get("groundingChunks")
+	if !chunks.Exists() || !chunks.IsArray() {
+		chunks = candidate.Get("groundingMetadata.groundingChunks")
+	}
+	if chunks.Exists() && chunks.IsArray() {
+		params.WebSearch.Results = toWebSearchResults(chunks.Array())
+	}
+
+	// Extract grounding supports (for citations)
+	supports := candidate.Get("groundingSupports")
+	if !supports.Exists() || !supports.IsArray() {
+		supports = candidate.Get("groundingMetadata.groundingSupports")
+	}
+	if supports.Exists() && supports.IsArray() {
+		params.WebSearch.Supports = supports.Array()
+	}
+}
+
+// buildCitationFromSupport creates a citation block from a grounding support entry.
+func buildCitationFromSupport(results []WebSearchResult, support gjson.Result) (string, bool) {
+	citedText := support.Get("segment.text").String()
+	if citedText == "" {
+		return "", false
+	}
+
+	indices := support.Get("groundingChunkIndices")
+	if !indices.Exists() || !indices.IsArray() || len(indices.Array()) == 0 {
+		return "", false
+	}
+
+	idx := int(indices.Array()[0].Int())
+	if idx < 0 || idx >= len(results) {
+		return "", false
+	}
+
+	result := results[idx]
+	citation := `{"type":"web_search_result_location","cited_text":"","url":"","title":"","encrypted_index":""}`
+	citation, _ = sjson.Set(citation, "cited_text", citedText)
+	citation, _ = sjson.Set(citation, "url", result.URL)
+	citation, _ = sjson.Set(citation, "title", result.Title)
+	citation, _ = sjson.Set(citation, "encrypted_index", stableEncryptedContent(result.URL, result.Title, citedText))
+
+	return citation, true
+}
+
+// emitWebSearchBlocks outputs the web search SSE blocks at stream end.
+// This includes: server_tool_use, web_search_tool_result, citations, and buffered text.
+func emitWebSearchBlocks(params *Params, output *string) {
+	// Ensure current block is closed
+	if params.ResponseType != 0 {
+		*output = *output + "event: content_block_stop\n"
+		*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+		*output = *output + "\n\n\n"
+		params.ResponseIndex++
+		params.ResponseType = 0
+	}
+
+	// Ensure we have a tool use ID
+	if params.WebSearch.ToolUseID == "" {
+		params.WebSearch.ToolUseID = makeServerToolUseID()
+	}
+
+	// 1. server_tool_use block
+	*output = *output + "event: content_block_start\n"
+	serverToolBlock := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"%s","name":"web_search","input":{}}}`,
+		params.ResponseIndex, params.WebSearch.ToolUseID)
+	*output = *output + fmt.Sprintf("data: %s\n\n\n", serverToolBlock)
+
+	// Send the query as input
+	queryJSON := `{"query":""}`
+	queryJSON, _ = sjson.Set(queryJSON, "query", params.WebSearch.Query)
+	*output = *output + "event: content_block_delta\n"
+	inputDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"input_json_delta","partial_json":""}}`, params.ResponseIndex)
+	inputDelta, _ = sjson.Set(inputDelta, "delta.partial_json", queryJSON)
+	*output = *output + fmt.Sprintf("data: %s\n\n\n", inputDelta)
+
+	*output = *output + "event: content_block_stop\n"
+	*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+	*output = *output + "\n\n\n"
+	params.ResponseIndex++
+
+	// 2. web_search_tool_result block
+	resultsJSON, _ := json.Marshal(params.WebSearch.Results)
+	*output = *output + "event: content_block_start\n"
+	toolResultBlock := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"%s","content":%s}}`,
+		params.ResponseIndex, params.WebSearch.ToolUseID, string(resultsJSON))
+	*output = *output + fmt.Sprintf("data: %s\n\n\n", toolResultBlock)
+
+	*output = *output + "event: content_block_stop\n"
+	*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+	*output = *output + "\n\n\n"
+	params.ResponseIndex++
+
+	// 3. Citation blocks
+	for _, support := range params.WebSearch.Supports {
+		citation, ok := buildCitationFromSupport(params.WebSearch.Results, support)
+		if !ok {
+			continue
+		}
+
+		*output = *output + "event: content_block_start\n"
+		citationBlock := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"text","text":"","citations":[]}}`, params.ResponseIndex)
+		*output = *output + fmt.Sprintf("data: %s\n\n\n", citationBlock)
+
+		*output = *output + "event: content_block_delta\n"
+		citationDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"citations_delta","citation":null}}`, params.ResponseIndex)
+		citationDelta, _ = sjson.SetRaw(citationDelta, "delta.citation", citation)
+		*output = *output + fmt.Sprintf("data: %s\n\n\n", citationDelta)
+
+		*output = *output + "event: content_block_stop\n"
+		*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+		*output = *output + "\n\n\n"
+		params.ResponseIndex++
+	}
+
+	// 4. Final text block with buffered content
+	if len(params.WebSearch.BufferedTextParts) > 0 {
+		*output = *output + "event: content_block_start\n"
+		*output = *output + fmt.Sprintf(`data: {"type":"content_block_start","index":%d,"content_block":{"type":"text","text":""}}`, params.ResponseIndex)
+		*output = *output + "\n\n\n"
+
+		for _, text := range params.WebSearch.BufferedTextParts {
+			if text == "" {
+				continue
+			}
+			*output = *output + "event: content_block_delta\n"
+			textDelta := fmt.Sprintf(`{"type":"content_block_delta","index":%d,"delta":{"type":"text_delta","text":""}}`, params.ResponseIndex)
+			textDelta, _ = sjson.Set(textDelta, "delta.text", text)
+			*output = *output + fmt.Sprintf("data: %s\n\n\n", textDelta)
+		}
+
+		*output = *output + "event: content_block_stop\n"
+		*output = *output + fmt.Sprintf(`data: {"type":"content_block_stop","index":%d}`, params.ResponseIndex)
+		*output = *output + "\n\n\n"
+		params.ResponseIndex++
+	}
+
+	params.ResponseType = 0
 }

@@ -1,0 +1,39 @@
+一开始用claude,模型切换到gemini之后就会出现 API Error: 400 {"error":{"code":400,"message":"Corrupted thought signature.","status":"INVALID_ARGUMENT"}}
+
+既然本来这个站点就是原生支持claudecode的,怎么做到完全还原体验呢(相当于CLIProxyAPI只是承担了一个转发工作)(这个挺重要的,因为很多中转站点都是原生支持claudecode的)
+
+额原来CLIProxyAPI本来就支持claudecode兼容的中转站(笑)
+antigravity的signature不知道会不会和他们冲突
+
+一个可以把便宜模型当不要钱一样充分利用的subagent怎么写
+
+gemini 
+
+https://github.com/mihomo-party-org/clash-party 如果想在linux服务器上运行clash-party应该怎么做(主要是他好像只支持图形化界面的方式启动)
+
+https://github.com/znlsl/Antigravity2Api
+https://github.com/lbjlaq/Antigravity-Manager
+https://github.com/justlovemaki/AIClient-2-API
+https://github.com/liuw1535/antigravity2api-nodejs
+
+感觉这几个的Antigravity2api比较先进,cliproxyapi可以尽量参考一下
+
+cliproxy后台任务右键的更多功能(查看日志之类的)
+
+经常出现卡住的情况,请求过期时间有写吗,还是说永远不会返回错误
+
+gemini怎么适配claudecode (参考上面几个项目)
+
+开一个subagent应该也算一次请求吧
+
+配置是动态刷新的吗
+
+让gemini3pro取消思考
+
+antigravity的轮询机制是分模型的吗!!!!重要
+
+上一次commit你觉得合理吗
+
+帮我看一下ref文件夹的四个仓库对于gemini接入claudecode有什么特殊处理(因
+为我自己用的时候,会发现gemini如果不经过任何处理就接入claudecode,很多工具
+或者功能都无法使用,使用体验也很糟糕)

@@ -19,6 +19,21 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// hasWebSearchTool checks if the Claude request contains a web_search tool.
+// When detected, we route the request to use Gemini's native Google Search Grounding.
+func hasWebSearchTool(rawJSON []byte) bool {
+	toolsResult := gjson.GetBytes(rawJSON, "tools")
+	if !toolsResult.IsArray() {
+		return false
+	}
+	for _, tool := range toolsResult.Array() {
+		if tool.Get("name").String() == "web_search" {
+			return true
+		}
+	}
+	return false
+}
+
 // deriveSessionID generates a stable session ID from the request.
 // Uses the hash of the first user message to identify the conversation.
 func deriveSessionID(rawJSON []byte) string {
@@ -324,27 +339,38 @@ func ConvertClaudeRequestToAntigravity(modelName string, inputRawJSON []byte, _ 
 	// tools
 	toolsJSON := ""
 	toolDeclCount := 0
-	allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
-	toolsResult := gjson.GetBytes(rawJSON, "tools")
-	if toolsResult.IsArray() {
-		toolsJSON = `[{"functionDeclarations":[]}]`
-		toolsResults := toolsResult.Array()
-		for i := 0; i < len(toolsResults); i++ {
-			toolResult := toolsResults[i]
-			inputSchemaResult := toolResult.Get("input_schema")
-			if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
-				// Sanitize the input schema for Antigravity API compatibility
-				inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
-				tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
-				tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
-				for toolKey := range gjson.Parse(tool).Map() {
-					if util.InArray(allowedToolKeys, toolKey) {
-						continue
+	webSearchEnabled := hasWebSearchTool(rawJSON)
+
+	// When web_search is detected, use Gemini's native googleSearch instead of function declarations
+	if webSearchEnabled {
+		// googleSearch tool configuration for Gemini Google Search Grounding
+		// Reference: Antigravity2Api/src/transform/claude/ClaudeTransformer.js
+		toolsJSON = `[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}]`
+		toolDeclCount = 1 // Count as having tools to trigger proper response handling
+		log.Debugf("Web search tool detected, using Gemini googleSearch grounding")
+	} else {
+		allowedToolKeys := []string{"name", "description", "behavior", "parameters", "parametersJsonSchema", "response", "responseJsonSchema"}
+		toolsResult := gjson.GetBytes(rawJSON, "tools")
+		if toolsResult.IsArray() {
+			toolsJSON = `[{"functionDeclarations":[]}]`
+			toolsResults := toolsResult.Array()
+			for i := 0; i < len(toolsResults); i++ {
+				toolResult := toolsResults[i]
+				inputSchemaResult := toolResult.Get("input_schema")
+				if inputSchemaResult.Exists() && inputSchemaResult.IsObject() {
+					// Sanitize the input schema for Antigravity API compatibility
+					inputSchema := util.CleanJSONSchemaForAntigravity(inputSchemaResult.Raw)
+					tool, _ := sjson.Delete(toolResult.Raw, "input_schema")
+					tool, _ = sjson.SetRaw(tool, "parametersJsonSchema", inputSchema)
+					for toolKey := range gjson.Parse(tool).Map() {
+						if util.InArray(allowedToolKeys, toolKey) {
+							continue
+						}
+						tool, _ = sjson.Delete(tool, toolKey)
 					}
-					tool, _ = sjson.Delete(tool, toolKey)
+					toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.functionDeclarations.-1", tool)
+					toolDeclCount++
 				}
-				toolsJSON, _ = sjson.SetRaw(toolsJSON, "0.functionDeclarations.-1", tool)
-				toolDeclCount++
 			}
 		}
 	}
