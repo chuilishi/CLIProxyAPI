@@ -1237,7 +1237,8 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 		fork  bool
 	}
 
-	forward := make(map[string]mappingEntry, len(mappings))
+	// Use slice to support one-to-many mappings (one backend model -> multiple aliases)
+	forward := make(map[string][]mappingEntry, len(mappings))
 	for i := range mappings {
 		name := strings.TrimSpace(mappings[i].Name)
 		alias := strings.TrimSpace(mappings[i].Alias)
@@ -1248,13 +1249,28 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 		key := strings.ToLower(name)
-		if _, exists := forward[key]; exists {
-			continue
+		// Check if this alias already exists for this name to avoid duplicates
+		alreadyExists := false
+		for _, existing := range forward[key] {
+			if strings.EqualFold(existing.alias, alias) {
+				alreadyExists = true
+				break
+			}
 		}
-		forward[key] = mappingEntry{alias: alias, fork: mappings[i].Fork}
+		if !alreadyExists {
+			forward[key] = append(forward[key], mappingEntry{alias: alias, fork: mappings[i].Fork})
+		}
 	}
 	if len(forward) == 0 {
 		return models
+	}
+	// Debug: log the forward mapping table
+	for k, entries := range forward {
+		aliases := make([]string, len(entries))
+		for i, e := range entries {
+			aliases[i] = e.alias
+		}
+		log.Debugf("[applyOAuthModelMappings] forward[%s] = %v", k, aliases)
 	}
 	out := make([]*ModelInfo, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
@@ -1267,17 +1283,8 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 		key := strings.ToLower(id)
-		entry, ok := forward[key]
-		if !ok {
-			if _, exists := seen[key]; exists {
-				continue
-			}
-			seen[key] = struct{}{}
-			out = append(out, model)
-			continue
-		}
-		mappedID := strings.TrimSpace(entry.alias)
-		if mappedID == "" {
+		entries, ok := forward[key]
+		if !ok || len(entries) == 0 {
 			if _, exists := seen[key]; exists {
 				continue
 			}
@@ -1286,40 +1293,63 @@ func applyOAuthModelMappings(cfg *config.Config, provider, authKind string, mode
 			continue
 		}
 
-		if entry.fork {
-			if _, exists := seen[key]; !exists {
+		// Process all mapping entries for this model (one-to-many support)
+		for idx, entry := range entries {
+			mappedID := strings.TrimSpace(entry.alias)
+			if mappedID == "" {
+				if _, exists := seen[key]; exists {
+					continue
+				}
 				seen[key] = struct{}{}
 				out = append(out, model)
-			}
-			aliasKey := strings.ToLower(mappedID)
-			if _, exists := seen[aliasKey]; exists {
 				continue
 			}
-			seen[aliasKey] = struct{}{}
+
+			if entry.fork {
+				// For fork mode: keep original model (only once) and add alias
+				if idx == 0 {
+					if _, exists := seen[key]; !exists {
+						seen[key] = struct{}{}
+						out = append(out, model)
+					}
+				}
+				aliasKey := strings.ToLower(mappedID)
+				if _, exists := seen[aliasKey]; exists {
+					continue
+				}
+				seen[aliasKey] = struct{}{}
+				clone := *model
+				clone.ID = mappedID
+				if clone.Name != "" {
+					clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
+				}
+				out = append(out, &clone)
+				continue
+			}
+
+			// Non-fork mode: replace original with alias(es)
+			uniqueKey := strings.ToLower(mappedID)
+			if _, exists := seen[uniqueKey]; exists {
+				continue
+			}
+			seen[uniqueKey] = struct{}{}
+			if mappedID == id {
+				out = append(out, model)
+				continue
+			}
 			clone := *model
 			clone.ID = mappedID
 			if clone.Name != "" {
 				clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
 			}
 			out = append(out, &clone)
-			continue
 		}
-
-		uniqueKey := strings.ToLower(mappedID)
-		if _, exists := seen[uniqueKey]; exists {
-			continue
-		}
-		seen[uniqueKey] = struct{}{}
-		if mappedID == id {
-			out = append(out, model)
-			continue
-		}
-		clone := *model
-		clone.ID = mappedID
-		if clone.Name != "" {
-			clone.Name = rewriteModelInfoName(clone.Name, id, mappedID)
-		}
-		out = append(out, &clone)
 	}
+	// Debug: log the output models
+	outIDs := make([]string, len(out))
+	for i, m := range out {
+		outIDs[i] = m.ID
+	}
+	log.Debugf("[applyOAuthModelMappings] output models: %v", outIDs)
 	return out
 }

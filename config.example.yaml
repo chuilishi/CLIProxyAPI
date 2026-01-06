@@ -214,8 +214,30 @@ ws-auth: false
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
 #   antigravity:
-#     - name: "gemini-3-pro-preview"
-#       alias: "g3p"
+#     # Antigravity backend model names (inferred from previous hardcoded mappings):
+#     # Gemini models:
+#     #   - rev19-uic3-1p (computer use model)
+#     #   - gemini-3-pro-high (gemini 3 pro)
+#     #   - gemini-3-pro-image (image generation)
+#     #   - gemini-3-flash
+#     # Claude models:
+#     #   - claude-sonnet-4-5
+#     #   - claude-sonnet-4-5-thinking
+#     #   - claude-opus-4-5-thinking
+#     - name: "rev19-uic3-1p"                      # antigravity backend name
+#       alias: "gemini-2.5-computer-use-preview"  # user-visible alias
+#     - name: "gemini-3-pro-high"
+#       alias: "gemini-3-pro-preview"
+#     - name: "gemini-3-pro-image"
+#       alias: "gemini-3-pro-image-preview"
+#     - name: "gemini-3-flash"
+#       alias: "gemini-3-flash-preview"
+#     - name: "claude-sonnet-4-5"
+#       alias: "claude-sonnet-4-5-20250929"
+#     - name: "claude-sonnet-4-5-thinking"
+#       alias: "claude-sonnet-4-5-thinking-20250929"
+#     - name: "claude-opus-4-5-thinking"
+#       alias: "claude-opus-4-5-20251101"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"

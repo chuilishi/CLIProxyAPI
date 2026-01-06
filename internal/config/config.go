@@ -521,7 +521,8 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 // SanitizeOAuthModelMappings normalizes and deduplicates global OAuth model name mappings.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
-// and ensures (From, To) pairs are unique within each channel.
+// and ensures (Name, Alias) pairs are unique within each channel.
+// Supports one-to-many mappings: the same Name can map to multiple different Aliases.
 func (cfg *Config) SanitizeOAuthModelMappings() {
 	if cfg == nil || len(cfg.OAuthModelMappings) == 0 {
 		return
@@ -532,7 +533,9 @@ func (cfg *Config) SanitizeOAuthModelMappings() {
 		if channel == "" || len(mappings) == 0 {
 			continue
 		}
-		seenName := make(map[string]struct{}, len(mappings))
+		// Track seen (name, alias) pairs to avoid duplicates while allowing one-to-many
+		seenPairs := make(map[string]struct{}, len(mappings))
+		// Track seen aliases to prevent alias collisions
 		seenAlias := make(map[string]struct{}, len(mappings))
 		clean := make([]ModelNameMapping, 0, len(mappings))
 		for _, mapping := range mappings {
@@ -546,13 +549,14 @@ func (cfg *Config) SanitizeOAuthModelMappings() {
 			}
 			nameKey := strings.ToLower(name)
 			aliasKey := strings.ToLower(alias)
-			if _, ok := seenName[nameKey]; ok {
+			pairKey := nameKey + "\x00" + aliasKey
+			if _, ok := seenPairs[pairKey]; ok {
 				continue
 			}
 			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}
-			seenName[nameKey] = struct{}{}
+			seenPairs[pairKey] = struct{}{}
 			seenAlias[aliasKey] = struct{}{}
 			clean = append(clean, ModelNameMapping{Name: name, Alias: alias, Fork: mapping.Fork})
 		}
